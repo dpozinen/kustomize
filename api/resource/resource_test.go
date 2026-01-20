@@ -621,33 +621,170 @@ metadata:
   name: clown
 data:
   fruit: pear
+  override: new value
 `))
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
-	patch, err := factory.FromBytes([]byte(`
+	old, err := factory.FromBytes([]byte(`
 apiVersion: v1
 kind: Whatever
 metadata:
   name: spaceship
 data:
   spaceship: enterprise
+  override: og value
 `))
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
-	resource.MergeDataMapFrom(patch)
+	resource.MergeDataMapFrom(old)
 	bytes, err := resource.AsYAML()
 	require.NoError(t, err)
 	assert.Equal(t, `apiVersion: v1
 data:
   fruit: pear
+  override: new value
   spaceship: enterprise
 kind: BlahBlah
 metadata:
   name: clown
 `, string(bytes))
 }
+
+func TestMergeDataMapFrom_ValueMerge(t *testing.T) {
+	resource, err := factory.FromBytes([]byte(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+  annotations:
+    internal.config.kubernetes.io/valueMerge: '{"config.properties":"kv","config.yaml":"yaml"}'
+data:
+  plain-key: overlay value
+  config.yaml: |
+    override: new value
+    patch: patch only value
+    list:
+    - new1
+    - new2
+    map:
+      map-key-patch: new value
+    associative-list: # {"type":"array", "x-kubernetes-patch-strategy": "merge", "x-kubernetes-patch-merge-key":"name"}
+      - name: named
+        value1: new value
+
+  config.properties: |
+    patch=patch only value
+    override=new value`))
+	require.NoError(t, err)
+	old, err := factory.FromBytes([]byte(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+  annotations:
+    internal.config.kubernetes.io/valueMerge: '{"config.properties":"kv","config.yaml":"yaml"}'
+data:
+  plain-key: base value
+  config.yaml: |
+    base: base only value
+    override: og value
+    map:
+      map-key-og: og value
+    list:
+    - og1
+    associative-list:
+      - name: named
+        value1: og value
+        key-only-in-old: value-only-in-old
+
+  config.properties: |
+    base=base only value
+    override=og value`))
+	require.NoError(t, err)
+	require.NoError(t, resource.MergeDataMapFrom(old))
+	bytes, err := resource.AsYAML()
+	require.NoError(t, err)
+	assert.Equal(t, `apiVersion: v1
+data:
+  config.properties: |
+    base=base only value
+    override=new value
+    patch=patch only value
+  config.yaml: |
+    base: base only value
+    override: new value
+    map:
+      map-key-og: og value
+      map-key-patch: new value
+    list:
+    - new1
+    - new2
+    associative-list:
+    - name: named
+      value1: new value
+      key-only-in-old: value-only-in-old
+    patch: patch only value
+  plain-key: overlay value
+kind: ConfigMap
+metadata:
+  annotations:
+    internal.config.kubernetes.io/valueMerge: '{"config.properties":"kv","config.yaml":"yaml"}'
+  name: test
+`, string(bytes))
+}
+
+func TestMergeDataMapFrom_ValueMerge_InvalidContent(t *testing.T) {
+	validYaml := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+  annotations:
+    internal.config.kubernetes.io/valueMerge: '{"config.yaml":"yaml"}'
+data:
+  config.yaml: |
+    new: value
+`
+	invalidYaml := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+  annotations:
+    internal.config.kubernetes.io/valueMerge: '{"config.yaml":"yaml"}'
+data:
+  config.yaml: |
+    invalid: yaml: content:
+`
+	tests := []struct {
+		name         string
+		resourceYAML string
+		oldYAML      string
+	}{
+		{
+			name:         "invalid YAML content in new resource",
+			resourceYAML: invalidYaml,
+			oldYAML:      validYaml,
+		},
+		{
+			name:         "invalid YAML content in old resource",
+			resourceYAML: validYaml,
+			oldYAML:      invalidYaml,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resource, err := factory.FromBytes([]byte(tc.resourceYAML))
+			require.NoError(t, err)
+			old, err := factory.FromBytes([]byte(tc.oldYAML))
+			require.NoError(t, err)
+			err = resource.MergeDataMapFrom(old)
+			require.Error(t, err)
+		})
+	}
+}
+
 
 func TestApplySmPatch_SwapOrder(t *testing.T) {
 	s1 := `

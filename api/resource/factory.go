@@ -83,6 +83,9 @@ func (rf *Factory) makeOne(rn *yaml.RNode, o *types.GeneratorArgs) *Resource {
 		if o.Options == nil || !o.Options.DisableNameSuffixHash {
 			resource.EnableHashSuffix()
 		}
+		if o.Options != nil && len(o.Options.ValueMerge) > 0 {
+			resource.SetValueMerge(o.Options.ValueMerge)
+		}
 		resource.SetBehavior(types.NewGenerationBehavior(o.Behavior))
 	}
 

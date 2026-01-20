@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	idAnnotation       = "kustomize.config.k8s.io/id"
-	HashAnnotation     = "kustomize.config.k8s.io/needs-hash"
-	BehaviorAnnotation = "kustomize.config.k8s.io/behavior"
+	idAnnotation            = "kustomize.config.k8s.io/id"
+	HashAnnotation          = "kustomize.config.k8s.io/needs-hash"
+	BehaviorAnnotation      = "kustomize.config.k8s.io/behavior"
+	ValueMergeAnnotation = "kustomize.config.k8s.io/valueMerge"
 )
 
 func GoBin() string {
@@ -216,6 +217,7 @@ func UpdateResourceOptions(rm resmap.ResMap) (resmap.ResMap, error) {
 		// request it for each resource.
 		annotations := r.GetAnnotations()
 		behavior := annotations[BehaviorAnnotation]
+		valueMergeJSON := annotations[ValueMergeAnnotation]
 		var needsHash bool
 		if val, ok := annotations[HashAnnotation]; ok {
 			b, err := strconv.ParseBool(val)
@@ -228,6 +230,7 @@ func UpdateResourceOptions(rm resmap.ResMap) (resmap.ResMap, error) {
 		}
 		delete(annotations, HashAnnotation)
 		delete(annotations, BehaviorAnnotation)
+		delete(annotations, ValueMergeAnnotation)
 		if err := r.SetAnnotations(annotations); err != nil {
 			return nil, err
 		}
@@ -235,6 +238,15 @@ func UpdateResourceOptions(rm resmap.ResMap) (resmap.ResMap, error) {
 			r.EnableHashSuffix()
 		}
 		r.SetBehavior(types.NewGenerationBehavior(behavior))
+		if valueMergeJSON != "" {
+			var vm map[string]types.ValueMergeStrategy
+			if err := json.Unmarshal([]byte(valueMergeJSON), &vm); err != nil {
+				return nil, fmt.Errorf(
+					"the annotation %q contains invalid JSON (%q): %w",
+					ValueMergeAnnotation, valueMergeJSON, err)
+			}
+			r.SetValueMerge(vm)
+		}
 	}
 	return rm, nil
 }

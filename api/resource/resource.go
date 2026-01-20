@@ -4,8 +4,13 @@
 package resource
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
+	"sigs.k8s.io/kustomize/api/internal/validate"
+	"sigs.k8s.io/kustomize/api/kv"
+	"sigs.k8s.io/kustomize/kyaml/yaml/merge2"
 	"strings"
 
 	"sigs.k8s.io/kustomize/api/filters/patchstrategicmerge"
@@ -38,6 +43,7 @@ var BuildAnnotations = []string{
 	utils.BuildAnnotationsRefBy,
 	utils.BuildAnnotationsGenBehavior,
 	utils.BuildAnnotationsGenAddHashSuffix,
+	utils.BuildAnnotationsGenValueMerge,
 
 	kioutil.PathAnnotation,
 	kioutil.IndexAnnotation,
@@ -192,8 +198,99 @@ func (r *Resource) copyKustomizeSpecificFields(other *Resource) {
 	r.refVarNames = copyStringSlice(other.refVarNames)
 }
 
-func (r *Resource) MergeDataMapFrom(o *Resource) {
-	r.SetDataMap(mergeStringMaps(o.GetDataMap(), r.GetDataMap()))
+func (r *Resource) MergeDataMapFrom(o *Resource) error {
+	vm := r.ValueMerge()
+	if len(vm) == 0 {
+		r.SetDataMap(mergeStringMaps(o.GetDataMap(), r.GetDataMap()))
+		return nil
+	}
+	if r.GetKind() == "Secret" {
+		return r.mergeSecretDataFrom(o, vm)
+	}
+	return r.mergeConfigMapDataFrom(o, vm)
+}
+
+func (r *Resource) mergeConfigMapDataFrom(o *Resource, vm map[string]types.ValueMergeStrategy) error {
+	base := o.GetDataMap()
+	overlay := r.GetDataMap()
+	merged := make(map[string]string, len(base))
+
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, overlayVal := range overlay {
+		strategy, isValueMerge := vm[k]
+		baseVal, hasBase := merged[k]
+		if isValueMerge && hasBase {
+			m, err := mergeContent(baseVal, overlayVal, strategy)
+			if err != nil {
+				return fmt.Errorf("cannot merge key %q: %w", k, err)
+			}
+			merged[k] = m
+		} else {
+			merged[k] = overlayVal
+		}
+	}
+
+	r.SetDataMap(merged)
+	return nil
+}
+
+func (r *Resource) mergeSecretDataFrom(o *Resource, vm map[string]types.ValueMergeStrategy) error {
+	base, err := decodeBase64Map(o.GetDataMap())
+	if err != nil {
+		return err
+	}
+	overlay, err := decodeBase64Map(r.GetDataMap())
+	if err != nil {
+		return err
+	}
+
+	merged := make(map[string]string, len(base))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, overlayVal := range overlay {
+		strategy, isValueMerge := vm[k]
+		baseVal, hasBase := merged[k]
+		if isValueMerge && hasBase {
+			m, err := mergeContent(baseVal, overlayVal, strategy)
+			if err != nil {
+				return fmt.Errorf("cannot merge key %q: %w", k, err)
+			}
+			merged[k] = m
+		} else {
+			merged[k] = overlayVal
+		}
+	}
+
+	if err := r.PipeE(kyaml.Clear(kyaml.DataField)); err != nil {
+		return err
+	}
+	return r.LoadMapIntoSecretData(merged)
+}
+
+func decodeBase64Map(m map[string]string) (map[string]string, error) {
+	decoded := make(map[string]string, len(m))
+	for key, val := range m {
+		decodedBytes, err := base64.StdEncoding.DecodeString(val)
+		if err != nil {
+			return nil, fmt.Errorf("cannot decode base64 for key %q: %w", key, err)
+		}
+		decoded[key] = string(decodedBytes)
+	}
+	return decoded, nil
+}
+
+func mergeContent(base, overlay string, strategy types.ValueMergeStrategy) (string, error) {
+	switch strategy {
+	case types.ValueMergeStrategyKV:
+		return mergeKVContent(base, overlay)
+	case types.ValueMergeStrategyYAML:
+		return mergeYamlContent(base, overlay)
+	default:
+		return "", fmt.Errorf("unknown value merge strategy: %q", strategy)
+	}
 }
 
 func (r *Resource) MergeBinaryDataMapFrom(o *Resource) {
@@ -414,6 +511,34 @@ func (r *Resource) SetBehavior(behavior types.GenerationBehavior) {
 	}
 }
 
+func (r *Resource) ValueMerge() map[string]types.ValueMergeStrategy {
+	raw := r.GetAnnotations()[utils.BuildAnnotationsGenValueMerge]
+	if raw == "" {
+		return nil
+	}
+	var vm map[string]types.ValueMergeStrategy
+	if err := json.Unmarshal([]byte(raw), &vm); err != nil {
+		return nil
+	}
+	return vm
+}
+
+func (r *Resource) SetValueMerge(vm map[string]types.ValueMergeStrategy) {
+	annotations := r.GetAnnotations()
+	if len(vm) == 0 {
+		delete(annotations, utils.BuildAnnotationsGenValueMerge)
+	} else {
+		data, err := json.Marshal(vm)
+		if err != nil {
+			panic(err)
+		}
+		annotations[utils.BuildAnnotationsGenValueMerge] = string(data)
+	}
+	if err := r.SetAnnotations(annotations); err != nil {
+		panic(err)
+	}
+}
+
 // NeedHashSuffix returns true if a resource content
 // hash should be appended to the name of the resource.
 func (r *Resource) NeedHashSuffix() bool {
@@ -533,6 +658,54 @@ func mergeStringMaps(maps ...map[string]string) map[string]string {
 		}
 	}
 	return result
+}
+
+func mergeYamlContent(dst string, src string) (string, error) {
+	return merge2.MergeStrings(src, dst, false, kyaml.MergeOptions{
+		ListIncreaseDirection: kyaml.MergeOptionsListPrepend,
+	})
+}
+
+func mergeKVContent(dst string, src string) (string, error) {
+	loader := kv.NewLoader(nil, validate.NewFieldValidator())
+	dstPairs, err := loader.LoadLines(dst)
+	if err != nil {
+		return "", err
+	}
+	srcPairs, err := loader.LoadLines(src)
+	if err != nil {
+		return "", err
+	}
+	mergedPairs := mergePairs(dstPairs, srcPairs)
+
+	var merged strings.Builder
+	for _, p := range mergedPairs {
+		merged.WriteString(fmt.Sprintf("%s=%s\n", p.Key, p.Value))
+	}
+
+	return merged.String(), nil
+}
+
+// merging on slices instead of maps preserves order, which is especially important in
+// the context of config maps due to hashing
+func mergePairs(dst, src []types.Pair) []types.Pair {
+	seen := make(map[string]int)
+	for i, p := range dst {
+		seen[p.Key] = i
+	}
+
+	merged := make([]types.Pair, len(dst))
+	copy(merged, dst)
+
+	for _, p := range src {
+		if idx, exists := seen[p.Key]; exists {
+			merged[idx] = p
+		} else {
+			merged = append(merged, p)
+		}
+	}
+
+	return merged
 }
 
 func mergeStringMapsWithBuildAnnotations(maps ...map[string]string) map[string]string {

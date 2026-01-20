@@ -761,3 +761,55 @@ metadata:
 		})
 	}
 }
+
+func TestFromMapAndOption_ValueMerge(t *testing.T) {
+	tests := []struct {
+		name     string
+		options  *types.GeneratorOptions
+		expected map[string]types.ValueMergeStrategy
+	}{
+		{
+			name: "with valueMerge kv and yaml",
+			options: &types.GeneratorOptions{
+				ValueMerge: map[string]types.ValueMergeStrategy{
+					"app.properties": types.ValueMergeStrategyKV,
+					"config.yaml":    types.ValueMergeStrategyYAML,
+				},
+			},
+			expected: map[string]types.ValueMergeStrategy{
+				"app.properties": types.ValueMergeStrategyKV,
+				"config.yaml":    types.ValueMergeStrategyYAML,
+			},
+		},
+		{
+			name:     "with nil ValueMerge",
+			options:  &types.GeneratorOptions{},
+			expected: nil,
+		},
+		{
+			name:     "with nil options",
+			options:  nil,
+			expected: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resource, err := factory.FromMapAndOption(
+				map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata":   map[string]interface{}{"name": "test"},
+				},
+				&types.GeneratorArgs{
+					Options: tc.options,
+				},
+			)
+			require.NoError(t, err)
+			require.NotNil(t, resource)
+
+			actual := resource.ValueMerge()
+			require.Equal(t, tc.expected, actual)
+		})
+	}
+}

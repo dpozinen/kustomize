@@ -3,6 +3,11 @@
 
 package types
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // GeneratorOptions modify behavior of all ConfigMap and Secret generators.
 type GeneratorOptions struct {
 	// Labels to add to all generated resources.
@@ -18,6 +23,35 @@ type GeneratorOptions struct {
 
 	// Immutable if true add to all generated resources.
 	Immutable bool `json:"immutable,omitempty" yaml:"immutable,omitempty"`
+
+	// ValueMerge maps data keys to merge strategies for content-level merging.
+	// Only keys listed here get content-merged during behavior:merge; all others
+	// use normal key-override. Strategy must be explicitly specified (kv or yaml).
+	ValueMerge map[string]ValueMergeStrategy `json:"valueMerge,omitempty" yaml:"valueMerge,omitempty"`
+}
+
+// ValueMergeStrategy specifies how a data key's value should be content-merged.
+type ValueMergeStrategy string
+
+const (
+	ValueMergeStrategyKV   ValueMergeStrategy = "kv"
+	ValueMergeStrategyYAML ValueMergeStrategy = "yaml"
+)
+
+func (s *ValueMergeStrategy) UnmarshalJSON(data []byte) error {
+	var raw string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	switch raw {
+	case "kv":
+		*s = ValueMergeStrategyKV
+	case "yaml":
+		*s = ValueMergeStrategyYAML
+	default:
+		return fmt.Errorf("invalid value merge strategy: %q, must be \"kv\" or \"yaml\"", raw)
+	}
+	return nil
 }
 
 // MergeGlobalOptionsIntoLocal merges two instances of GeneratorOptions.
@@ -42,6 +76,7 @@ func MergeGlobalOptionsIntoLocal(
 	}
 	overrideMap(&localOpts.Labels, globalOpts.Labels)
 	overrideMap(&localOpts.Annotations, globalOpts.Annotations)
+	overrideMap(&localOpts.ValueMerge, globalOpts.ValueMerge)
 	if globalOpts.DisableNameSuffixHash {
 		localOpts.DisableNameSuffixHash = true
 	}
@@ -51,7 +86,7 @@ func MergeGlobalOptionsIntoLocal(
 	return localOpts
 }
 
-func overrideMap(localMap *map[string]string, globalMap map[string]string) {
+func overrideMap[V any](localMap *map[string]V, globalMap map[string]V) {
 	if *localMap == nil {
 		if globalMap != nil {
 			*localMap = CopyMap(globalMap)
@@ -67,8 +102,8 @@ func overrideMap(localMap *map[string]string, globalMap map[string]string) {
 }
 
 // CopyMap copies a map.
-func CopyMap(in map[string]string) map[string]string {
-	out := make(map[string]string)
+func CopyMap[V any](in map[string]V) map[string]V {
+	out := make(map[string]V)
 	for k, v := range in {
 		out[k] = v
 	}

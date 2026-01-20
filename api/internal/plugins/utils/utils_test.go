@@ -31,7 +31,7 @@ func TestDeterminePluginSrcRoot(t *testing.T) {
 	}
 }
 
-func makeConfigMap(rf *resource.Factory, name, behavior string, hashValue *string) *resource.Resource {
+func makeConfigMap(rf *resource.Factory, name, behavior string, hashValue *string, valueMerge string) *resource.Resource {
 	r, err := rf.FromMap(map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
@@ -47,6 +47,9 @@ func makeConfigMap(rf *resource.Factory, name, behavior string, hashValue *strin
 	if hashValue != nil {
 		annotations[HashAnnotation] = *hashValue
 	}
+	if valueMerge != "" {
+		annotations[ValueMergeAnnotation] = valueMerge
+	}
 	if len(annotations) > 0 {
 		if err := r.SetAnnotations(annotations); err != nil {
 			panic(err)
@@ -55,14 +58,18 @@ func makeConfigMap(rf *resource.Factory, name, behavior string, hashValue *strin
 	return r
 }
 
-func makeConfigMapOptions(rf *resource.Factory, name, behavior string, disableHash bool) (*resource.Resource, error) {
+func makeConfigMapOptions(rf *resource.Factory, name, behavior string, disableHash bool, valueMerge map[string]types.ValueMergeStrategy) (*resource.Resource, error) {
+	opts := &types.GeneratorOptions{DisableNameSuffixHash: disableHash}
+	if len(valueMerge) > 0 {
+		opts.ValueMerge = valueMerge
+	}
 	return rf.FromMapAndOption(map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata":   map[string]interface{}{"name": name},
 	}, &types.GeneratorArgs{
 		Behavior: behavior,
-		Options:  &types.GeneratorOptions{DisableNameSuffixHash: disableHash}})
+		Options:  opts})
 }
 
 func strptr(s string) *string {
@@ -73,10 +80,17 @@ func TestUpdateResourceOptions(t *testing.T) {
 	rf := provider.NewDefaultDepProvider().GetResourceFactory()
 	in := resmap.New()
 	expected := resmap.New()
+	kvYamlVM := map[string]types.ValueMergeStrategy{
+		"app.properties": types.ValueMergeStrategyKV,
+		"config.yaml":    types.ValueMergeStrategyYAML,
+	}
+	kvYamlJSON := `{"app.properties":"kv","config.yaml":"yaml"}`
 	cases := []struct {
-		behavior  string
-		needsHash bool
-		hashValue *string
+		behavior       string
+		needsHash      bool
+		hashValue      *string
+		valueMerge     string
+		valueMergeOpts map[string]types.ValueMergeStrategy
 	}{
 		{hashValue: strptr("false")},
 		{hashValue: strptr("true"), needsHash: true},
@@ -86,12 +100,14 @@ func TestUpdateResourceOptions(t *testing.T) {
 		{behavior: "nonsense"},
 		{behavior: "merge", hashValue: strptr("false")},
 		{behavior: "merge", hashValue: strptr("true"), needsHash: true},
+		{behavior: "merge", valueMerge: kvYamlJSON, valueMergeOpts: kvYamlVM},
+		{behavior: "merge", hashValue: strptr("true"), needsHash: true, valueMerge: kvYamlJSON, valueMergeOpts: kvYamlVM},
 	}
 	for i, c := range cases {
 		name := fmt.Sprintf("test%d", i)
-		err := in.Append(makeConfigMap(rf, name, c.behavior, c.hashValue))
+		err := in.Append(makeConfigMap(rf, name, c.behavior, c.hashValue, c.valueMerge))
 		require.NoError(t, err)
-		config, err := makeConfigMapOptions(rf, name, c.behavior, !c.needsHash)
+		config, err := makeConfigMapOptions(rf, name, c.behavior, !c.needsHash, c.valueMergeOpts)
 		if err != nil {
 			t.Errorf("expected new instance with an options but got error: %v", err)
 		}
@@ -114,7 +130,7 @@ func TestUpdateResourceOptionsWithInvalidHashAnnotationValues(t *testing.T) {
 	for i := range cases {
 		name := fmt.Sprintf("test%d", i)
 		in := resmap.New()
-		err := in.Append(makeConfigMap(rf, name, "", &cases[i]))
+		err := in.Append(makeConfigMap(rf, name, "", &cases[i], ""))
 		require.NoError(t, err)
 		_, err = UpdateResourceOptions(in)
 		require.Error(t, err)

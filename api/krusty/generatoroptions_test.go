@@ -45,6 +45,88 @@ type: Opaque
 `)
 }
 
+func TestSecretValueMerge(t *testing.T) {
+	th := kusttest_test.MakeHarness(t)
+	th.WriteK("base", `
+secretGenerator:
+- name: app-secret
+  options:
+    valueMerge:
+      credentials.properties: kv
+  files:
+  - credentials.properties
+`)
+	th.WriteF("base/credentials.properties", `
+db.user=baseuser
+db.password=basepass
+api.key=basekey
+`)
+	th.WriteK("overlay", `
+resources:
+- ../base
+secretGenerator:
+- name: app-secret
+  behavior: merge
+  files:
+  - credentials.properties
+`)
+	th.WriteF("overlay/credentials.properties", `
+db.password=overlaypass
+api.url=https://api.example.com
+`)
+	m := th.Run("overlay", th.MakeDefaultOptions())
+	th.AssertActualEqualsExpected(m, `
+apiVersion: v1
+data:
+  credentials.properties: |
+    ZGIudXNlcj1iYXNldXNlcgpkYi5wYXNzd29yZD1vdmVybGF5cGFzcwphcGkua2V5PWJhc2
+    VrZXkKYXBpLnVybD1odHRwczovL2FwaS5leGFtcGxlLmNvbQo=
+kind: Secret
+metadata:
+  name: app-secret-c2798hm7fg
+type: Opaque
+`)
+}
+
+func TestGlobalValueMerge_NoLocalOptions(t *testing.T) {
+	th := kusttest_test.MakeHarness(t)
+	th.WriteK("base", `
+generatorOptions:
+  valueMerge:
+    config.properties: kv
+configMapGenerator:
+- name: app-config
+  files:
+  - config.properties
+`)
+	th.WriteF("base/config.properties", `
+base.key=base-value
+`)
+	th.WriteK("overlay", `
+resources:
+- ../base
+configMapGenerator:
+- name: app-config
+  behavior: merge
+  files:
+  - config.properties
+`)
+	th.WriteF("overlay/config.properties", `
+overlay.key=overlay-value
+`)
+	m := th.Run("overlay", th.MakeDefaultOptions())
+	th.AssertActualEqualsExpected(m, `
+apiVersion: v1
+data:
+  config.properties: |
+    base.key=base-value
+    overlay.key=overlay-value
+kind: ConfigMap
+metadata:
+  name: app-config-gg25g7969f
+`)
+}
+
 func TestGeneratorOptionsWithBases(t *testing.T) {
 	th := kusttest_test.MakeHarness(t)
 	th.WriteK("base", `

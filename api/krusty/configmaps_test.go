@@ -687,7 +687,97 @@ metadata:
 `)
 }
 
-// Regression test for https://github.com/kubernetes-sigs/kustomize/issues/5047
+func TestConfigMapValueMerge(t *testing.T) {
+	th := kusttest_test.MakeHarness(t)
+	th.WriteK("base", `
+configMapGenerator:
+- name: app-config
+  options:
+    valueMerge:
+      config.properties: kv
+      config.yaml: yaml
+      LITERAL_CONFIG: kv
+  files:
+  - config.properties
+  - config.yaml
+  literals:
+  - |
+    LITERAL_CONFIG=base.key=base-value
+    override.key=base-override
+  envs:
+  - app.env
+`)
+	th.WriteF("base/config.properties", `
+base.key=base-value
+override.key=base-override
+`)
+	th.WriteF("base/config.yaml", `
+database:
+  host: localhost
+  port: 5432
+features:
+  auth: true
+`)
+	th.WriteF("base/app.env", `
+ENV_KEY=base-env-value
+`)
+	th.WriteK("overlay", `
+resources:
+- ../base
+configMapGenerator:
+- name: app-config
+  behavior: merge
+  files:
+  - config.properties
+  - config.yaml
+  literals:
+  - |
+    LITERAL_CONFIG=overlay.key=overlay-value
+    override.key=overlay-override
+  envs:
+  - app.env
+`)
+	th.WriteF("overlay/config.properties", `
+overlay.key=overlay-value
+override.key=overlay-override
+`)
+	th.WriteF("overlay/config.yaml", `
+database:
+  host: prod.example.com
+  timeout: 30
+features:
+  logging: true
+`)
+	th.WriteF("overlay/app.env", `
+ENV_KEY=overlay-env-value
+`)
+	m := th.Run("overlay", th.MakeDefaultOptions())
+	th.AssertActualEqualsExpected(m, `
+apiVersion: v1
+data:
+  ENV_KEY: overlay-env-value
+  LITERAL_CONFIG: |
+    base.key=base-value
+    override.key=overlay-override
+    overlay.key=overlay-value
+  config.properties: |
+    base.key=base-value
+    override.key=overlay-override
+    overlay.key=overlay-value
+  config.yaml: |
+    database:
+      host: prod.example.com
+      port: 5432
+      timeout: 30
+    features:
+      auth: true
+      logging: true
+kind: ConfigMap
+metadata:
+  name: app-config-ttdkhfmb28
+`)
+}
+
 func TestPrefixSuffix2(t *testing.T) {
 	th := kusttest_test.MakeHarness(t)
 	th.WriteF("kustomization.yaml", `
